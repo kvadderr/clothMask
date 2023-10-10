@@ -6,6 +6,8 @@ import cv2
 import gdown
 import argparse
 import numpy as np
+import io
+import base64
 
 import torch
 import torch.nn.functional as F
@@ -17,7 +19,6 @@ from options import opt
 
 def load_checkpoint(model, checkpoint_path):
     if not os.path.exists(checkpoint_path):
-        print("----No checkpoints at given path----")
         return
     model_state_dict = torch.load(checkpoint_path, map_location=torch.device("cpu"))
     new_state_dict = OrderedDict()
@@ -26,7 +27,6 @@ def load_checkpoint(model, checkpoint_path):
         new_state_dict[name] = v
 
     model.load_state_dict(new_state_dict)
-    print("----checkpoints loaded from path: {}----".format(checkpoint_path))
     return model
 
 
@@ -121,6 +121,9 @@ def generate_mask(input_image, net, palette, device = 'cpu'):
         output_tensor = torch.squeeze(output_tensor, dim=0)
         output_arr = output_tensor.cpu().numpy()
 
+    kernel = np.ones((30, 30), np.uint8)
+    dilated_mask = cv2.dilate(output_arr[0].astype(np.uint8), kernel, iterations=1)
+    output_arr[0] = dilated_mask
     classes_to_save = []
 
     # Check which classes are present in the image
@@ -138,21 +141,49 @@ def generate_mask(input_image, net, palette, device = 'cpu'):
 
     # Save final cloth segmentations
     cloth_seg = Image.fromarray(output_arr[0].astype(np.uint8), mode='P')
-    cloth_seg.putpalette(palette)
+    cloth_seg.putpalette([0, 0, 0, 255, 255, 255])
     cloth_seg = cloth_seg.resize(img_size, Image.BICUBIC)
     cloth_seg.save(os.path.join(cloth_seg_out_dir, 'final_seg.png'))
     return cloth_seg
 
+def generate_mask_base64(input_image, net, palette, device='cpu'):
+    img = input_image
+    img_size = img.size
+    img = img.resize((768, 768), Image.BICUBIC)
+    image_tensor = apply_transform(img)
+    image_tensor = torch.unsqueeze(image_tensor, 0)
 
+    with torch.no_grad():
+        output_tensor = net(image_tensor.to(device))
+        output_tensor = F.log_softmax(output_tensor[0], dim=1)
+        output_tensor = torch.max(output_tensor, dim=1, keepdim=True)[1]
+        output_tensor = torch.squeeze(output_tensor, dim=0)
+        output_arr = output_tensor.cpu().numpy()
+
+    kernel = np.ones((30, 30), np.uint8)
+    dilated_mask = cv2.dilate(output_arr[0].astype(np.uint8), kernel, iterations=1)
+    output_arr[0] = dilated_mask
+
+    # Convert cloth segmentation image to PIL Image
+    cloth_seg_pil = Image.fromarray(output_arr[0].astype(np.uint8), mode='P')
+    cloth_seg_pil.putpalette([0, 0, 0, 255, 255, 255])
+    cloth_seg_pil = cloth_seg_pil.resize(img_size, Image.BICUBIC)
+
+    # Convert PIL Image to bytes
+    buffer = io.BytesIO()
+    cloth_seg_pil.save(buffer, format="PNG")
+    cloth_seg_bytes = buffer.getvalue()
+
+    # Encode the bytes to base64
+    cloth_seg_base64 = base64.b64encode(cloth_seg_bytes).decode("utf-8")
+
+    return cloth_seg_base64
 
 def check_or_download_model(file_path):
     if not os.path.exists(file_path):
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         url = "https://drive.google.com/uc?id=11xTBALOeUkyuaK3l60CpkYHLTmv7k3dY"
         gdown.download(url, file_path, quiet=False)
-        print("Model downloaded successfully.")
-    else:
-        print("Model already exists.")
 
 
 def load_seg_model(checkpoint_path, device='cpu'):
@@ -176,8 +207,8 @@ def main(args):
 
     img = Image.open(args.image).convert('RGB')
 
-    cloth_seg = generate_mask(img, net=model, palette=palette, device=device)
-
+    cloth_seg_base64 = generate_mask_base64(img, net=model, palette=palette, device=device)
+    print(cloth_seg_base64)
 
 
 if __name__ == '__main__':
